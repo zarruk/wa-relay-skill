@@ -1,20 +1,64 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ─── wa-relay configure ───
+# ─── wa-relay configure v0.2.0 ───
 # Generates the JSON config for multi-agent WhatsApp routing.
-# Usage: bash configure.sh <owner-phone-number>
-# Example: bash configure.sh +573001234567
+# Usage: bash configure.sh <owner-phone-number> [direct-numbers]
+# Example: bash configure.sh +573001234567 +573009999999,+573008888888
+#
+# direct-numbers: comma-separated list of additional numbers that go
+#                 directly to the main agent (bypassing the relay).
 
-OWNER="${1:?Usage: configure.sh <owner-phone-number> (e.g. +573001234567)}"
+OWNER="${1:?Usage: configure.sh <owner-phone-number> [direct-numbers-comma-separated]}"
+DIRECT="${2:-}"
 
-# Strip + for session ID use
-OWNER_CLEAN="${OWNER//+/}"
+# Build YAML bindings for owner
+YAML_BINDINGS="bindings:
+  - channel: whatsapp
+    agent: main
+    filter:
+      from: \"${OWNER}\""
+
+JSON_BINDINGS="    {
+      \"channel\": \"whatsapp\",
+      \"agent\": \"main\",
+      \"filter\": { \"from\": \"${OWNER}\" }
+    }"
+
+# Add direct numbers if provided
+if [[ -n "$DIRECT" ]]; then
+  IFS=',' read -ra NUMS <<< "$DIRECT"
+  for NUM in "${NUMS[@]}"; do
+    NUM="$(echo "$NUM" | xargs)"  # trim whitespace
+    YAML_BINDINGS+="
+  - channel: whatsapp
+    agent: main
+    filter:
+      from: \"${NUM}\""
+    JSON_BINDINGS+=",
+    {
+      \"channel\": \"whatsapp\",
+      \"agent\": \"main\",
+      \"filter\": { \"from\": \"${NUM}\" }
+    }"
+  done
+fi
+
+# Add catch-all for relay
+YAML_BINDINGS+="
+  - channel: whatsapp
+    agent: relay"
+
+JSON_BINDINGS+=",
+    {
+      \"channel\": \"whatsapp\",
+      \"agent\": \"relay\"
+    }"
 
 cat << EOF
 
 ═══════════════════════════════════════════════════════
-  wa-relay — Configuration Output
+  wa-relay — Configuration Output (v0.2.0)
 ═══════════════════════════════════════════════════════
 
 Add the following to your OpenClaw config:
@@ -32,15 +76,7 @@ agents:
 
 ── 2. bindings ─────────────────────────────────────
 
-bindings:
-  - channel: whatsapp
-    agent: main
-    filter:
-      from: "${OWNER}"
-  - channel: whatsapp
-    agent: relay
-    filter:
-      fromNot: "${OWNER}"
+${YAML_BINDINGS}
 
 ── JSON equivalent (if your config uses JSON) ──────
 
@@ -52,16 +88,7 @@ bindings:
     ]
   },
   "bindings": [
-    {
-      "channel": "whatsapp",
-      "agent": "main",
-      "filter": { "from": "${OWNER}" }
-    },
-    {
-      "channel": "whatsapp",
-      "agent": "relay",
-      "filter": { "fromNot": "${OWNER}" }
-    }
+${JSON_BINDINGS}
   ]
 }
 
@@ -72,3 +99,8 @@ bindings:
 ═══════════════════════════════════════════════════════
 
 EOF
+
+if [[ -n "$DIRECT" ]]; then
+  echo "ℹ️  Direct numbers (bypass relay): $DIRECT"
+  echo ""
+fi
