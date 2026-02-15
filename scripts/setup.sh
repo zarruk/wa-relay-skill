@@ -9,8 +9,9 @@ set -euo pipefail
 OWNER="${1:?Usage: setup.sh <owner-phone-number> (e.g. +573001234567)}"
 
 RELAY_WORKSPACE="$HOME/.openclaw/workspace-relay"
-MAIN_WORKSPACE="$HOME/.openclaw/workspace"
 OPENCLAW_DIR="$HOME/.openclaw"
+MAIN_AUTH="$OPENCLAW_DIR/agents/main/agent/auth-profiles.json"
+RELAY_AUTH_DIR="$OPENCLAW_DIR/agents/wa-relay/agent"
 
 echo "▸ wa-relay setup"
 echo "  Owner: $OWNER"
@@ -25,65 +26,115 @@ echo "② Writing relay SOUL.md ..."
 cat > "$RELAY_WORKSPACE/SOUL.md" << 'SOUL'
 # Relay Agent — SOUL.md
 
-You are a **message relay**. Your only job is to act as a bridge between third-party WhatsApp contacts and the owner.
+You are a **message relay**. Nothing more.
 
-## Core Rules
+## Absolute Rules
+- NEVER respond to the sender. NEVER. No exceptions.
+- When someone writes, ONLY notify the owner with who wrote and what they said.
+- When the owner tells you what to reply, send it to the third party verbatim.
+- Don't add anything of your own. Don't greet. Don't opine. Don't suggest.
+- You are a transparent bridge between the third party and the owner.
 
-1. **NEVER respond to third-party messages on your own.** You are not a chatbot. You are a messenger.
-2. When a third-party sends a message, **notify the owner** with the sender's name/number and the message content.
-3. Only send a reply to a third-party **when the owner explicitly authorizes it** and provides the text.
-4. Keep a log of relayed messages in `memory/` daily files.
-5. If the owner says "reply to [contact]: [message]", send that exact message to the contact.
-6. If unsure, ask the owner. Never improvise responses.
+## Notification format to owner
+📩 [sender number]: [exact message]
 
-## Message Format (to owner)
-
-```
-📨 Message from [sender name/number]:
-"[message content]"
-
-Reply with: reply to [number]: [your response]
-```
-
-## What You Don't Do
-
-- No opinions, no small talk with contacts
-- No auto-replies, no "I'll get back to you"
-- No sharing owner's info or schedule
-- No initiating conversations with anyone
+## Response to sender
+ONLY when the owner instructs it. Send exactly what the owner says, nothing more.
 SOUL
 
-# ── 3. Copy auth profiles ──
-AUTH_SRC="$MAIN_WORKSPACE/auth-profiles.json"
-if [[ -f "$AUTH_SRC" ]]; then
-  echo "③ Copying auth-profiles.json to relay workspace ..."
-  cp "$AUTH_SRC" "$RELAY_WORKSPACE/auth-profiles.json"
+cat > "$RELAY_WORKSPACE/AGENTS.md" << 'AGENTS'
+# AGENTS.md - WA Relay
+
+Relay agent for third-party WhatsApp messages. Read SOUL.md and follow instructions.
+AGENTS
+
+# ── 3. Copy auth profiles (with confirmation) ──
+echo ""
+echo "③ Auth credential sharing"
+echo "   The relay agent needs model provider credentials to function."
+echo "   This will copy auth-profiles.json from the main agent to the relay agent."
+if [[ -f "$MAIN_AUTH" ]]; then
+  read -rp "   Copy credentials? [Y/n] " confirm
+  confirm="${confirm:-Y}"
+  if [[ "$confirm" =~ ^[Yy] ]]; then
+    mkdir -p "$RELAY_AUTH_DIR"
+    cp "$MAIN_AUTH" "$RELAY_AUTH_DIR/auth-profiles.json"
+    echo "   ✓ Credentials copied."
+  else
+    echo "   ⚠ Skipped. The relay agent won't be able to authenticate with any model provider."
+    echo "     Copy manually: cp $MAIN_AUTH $RELAY_AUTH_DIR/auth-profiles.json"
+  fi
 else
-  echo "③ ⚠ auth-profiles.json not found at $AUTH_SRC — you'll need to copy it manually."
+  echo "   ⚠ auth-profiles.json not found at $MAIN_AUTH"
+  echo "     You'll need to copy it manually after locating it."
 fi
 
-# ── 4. Patch SAFE_SESSION_ID_RE ──
-# This allows colons and plus signs in session IDs (needed for phone-number-based routing).
-# Temporary fix until PR #16531 is merged upstream.
-echo "④ Patching SAFE_SESSION_ID_RE in OpenClaw paths-*.js files ..."
+# ── 4. Patch SAFE_SESSION_ID_RE (with confirmation) ──
+echo ""
+echo "④ Session ID regex patch (temporary)"
+echo "   OpenClaw rejects ':' and '+' in session IDs, which WhatsApp routing needs."
+echo "   This patches the regex to allow these characters. Backups (.bak) are created."
+echo "   This is temporary until PR #16531 is merged upstream."
+echo "   See: https://github.com/openclaw/openclaw/issues/16211"
 
-PATCHED=0
-for f in "$OPENCLAW_DIR"/node_modules/@openclaw/*/dist/paths-*.js "$OPENCLAW_DIR"/node_modules/.openclaw/*/dist/paths-*.js 2>/dev/null; do
-  [[ -f "$f" ]] || continue
-  if grep -q '\[a-z0-9._-\]' "$f"; then
-    sed -i.bak 's/\[a-z0-9\._-\]/[a-z0-9._:+\\-]/g' "$f"
-    echo "  ✓ Patched: $f"
-    PATCHED=$((PATCHED + 1))
+# Find OpenClaw dist files
+OPENCLAW_DIST=""
+for candidate in \
+  /opt/homebrew/lib/node_modules/openclaw/dist \
+  /usr/local/lib/node_modules/openclaw/dist \
+  /usr/lib/node_modules/openclaw/dist \
+  "$HOME/.npm-global/lib/node_modules/openclaw/dist" \
+  "$OPENCLAW_DIR/node_modules/openclaw/dist"; do
+  if [[ -d "$candidate" ]]; then
+    OPENCLAW_DIST="$candidate"
+    break
   fi
 done
 
-if [[ $PATCHED -eq 0 ]]; then
-  echo "  ⚠ No files needed patching (already patched or paths not found)."
-  echo "    If OpenClaw is installed elsewhere, patch manually:"
-  echo "    Change [a-z0-9._-] → [a-z0-9._:+\\-] in paths-*.js"
+if [[ -z "$OPENCLAW_DIST" ]]; then
+  echo "   ⚠ Could not find OpenClaw dist directory."
+  echo "     Locate paths-*.js files and change [a-z0-9._-] → [a-z0-9._:+\\-]"
 else
-  echo "  ✓ Patched $PATCHED file(s). (.bak backups created)"
-  echo "  ℹ This patch is temporary — remove after PR #16531 is merged."
+  NEEDS_PATCH=0
+  for f in "$OPENCLAW_DIST"/paths-*.js; do
+    [[ -f "$f" ]] || continue
+    if grep -q 'a-z0-9\._-' "$f" && ! grep -q 'a-z0-9\._:+' "$f"; then
+      NEEDS_PATCH=$((NEEDS_PATCH + 1))
+    fi
+  done
+
+  if [[ $NEEDS_PATCH -eq 0 ]]; then
+    echo "   ✓ Already patched or no files need patching."
+  else
+    read -rp "   Patch $NEEDS_PATCH file(s)? [Y/n] " confirm
+    confirm="${confirm:-Y}"
+    if [[ "$confirm" =~ ^[Yy] ]]; then
+      PATCHED=0
+      for f in "$OPENCLAW_DIST"/paths-*.js; do
+        [[ -f "$f" ]] || continue
+        if grep -q 'a-z0-9\._-' "$f" && ! grep -q 'a-z0-9\._:+' "$f"; then
+          node -e "
+const fs = require('fs');
+let c = fs.readFileSync('$f', 'utf8');
+const old = 'const SAFE_SESSION_ID_RE = /^[a-z0-9][a-z0-9._-]{0,127}\$/i;';
+const nw = 'const SAFE_SESSION_ID_RE = /^[a-z0-9][a-z0-9._:+\\\\-]{0,127}\$/i;';
+if (c.includes(old)) {
+  fs.writeFileSync('${f}.bak', c);
+  c = c.replace(old, nw);
+  fs.writeFileSync('$f', c);
+  console.log('  ✓ Patched: $f');
+} else {
+  console.log('  ⚠ Pattern not found in $f');
+}
+"
+          PATCHED=$((PATCHED + 1))
+        fi
+      done
+      echo "   ✓ Patched $PATCHED file(s). Backups created (.bak)"
+    else
+      echo "   ⚠ Skipped. Multi-agent routing will fail without this patch."
+    fi
+  fi
 fi
 
 echo ""
